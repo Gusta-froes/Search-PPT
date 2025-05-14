@@ -75,10 +75,10 @@ def solve_line(scenario_tuple, line, LEVEL=2, print_bool=False, parallel=0, temp
     # Solve the CVXPY problem using SCS with custom parameters. We have to do this because ncpol does not parse custom parameters to cvxpy solvers (despite of what the documentation says)
     solution = cvxpy_problem.solve(
         solver=cp.SCS,
-        eps=1e-10,
+        eps=1e-8,
         alpha=1.8,
         normalize=False,
-        max_iters = 1000000,
+        max_iters = 100000,
         verbose=print_bool
     )
     return -solution
@@ -90,7 +90,7 @@ def process_scenario(scenario, LEVEL=2, parallel=0):
     its solution, and write it to an output file.
     """
     # Build file paths.
-    base_path = r"\Users\gusta\OneDrive\Área de Trabalho\IC - Peter Brown\bell-ineqs"
+    base_path = r"/home/infres/froes-24/path/to/venv/Search-PPT/bell-ineqs"
     filename_base = f"{scenario[0]}{scenario[1]}{scenario[2]}{scenario[3]}"
     completed_path = os.path.join(base_path, f"{filename_base}_NLSwitch.txt")
     out_path = os.path.join(base_path, f"{filename_base}_Moroder2.txt")
@@ -121,4 +121,4 @@ if __name__ == '__main__':
     scenarios = [(4,4,2,2),(3,2,3,3),(3,3,3,2),(6,3,2,2),(2,2,4,4),(3,3,4,2)]
     for scenario in scenarios:
         print(f"Processing scenario: {scenario}")
-        process_scenario(scenario, LEVEL=2, parallel=0)
+        process_scenario(scenario, LEVEL=2, parallel=1)
