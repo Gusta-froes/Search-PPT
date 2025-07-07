@@ -193,7 +193,7 @@ def SDP_bob (alice_POVM, rho,d = 4):
     # two-outcome setting unpacking
     povm_two_outcome = []
     for b in range(2):
-        povm_two_outcome.append(bob_POVM[0][b].value)
+        povm_two_outcome.append(bob_POVM[1][b].value)
     optimized_bob_POVM.append(povm_two_outcome)
 
     return optimized_bob_POVM
@@ -235,6 +235,79 @@ def optimize_rho_TB(G, d=4):
 
 
     return rho.value
+
+
+def partial_transpose(rho, dims, subsystem='B'):
+    """
+    Return the partial transpose of density matrix rho on the given subsystem.
+    """
+    dA, dB = dims
+    rho_4d = rho.reshape((dA, dB, dA, dB))
+    if subsystem == 'B':
+        rho_pt = rho_4d.transpose(0, 3, 2, 1).reshape(rho.shape)
+    elif subsystem == 'A':
+        rho_pt = rho_4d.transpose(2, 1, 0, 3).reshape(rho.shape)
+    else:
+        raise ValueError("subsystem must be 'A' or 'B'")
+    return rho_pt
+
+def check_density_matrix(rho, tol=1e-9, verbose=False):
+    valid = True
+    if not np.allclose(rho, rho.conj().T, atol=tol):
+        max_diff = np.max(np.abs(rho - rho.conj().T))
+        print(f"Warning: rho is not Hermitian (max diff = {max_diff:.3e}).")
+        valid = False
+    elif verbose:
+        print("rho is Hermitian.")
+    eigvals = np.linalg.eigvalsh(rho)
+    if np.min(eigvals) < -tol:
+        print(f"Warning: rho is not PSD (min eigenvalue = {np.min(eigvals):.3e}).")
+        valid = False
+    elif verbose:
+        print(f"rho is PSD (min eigenvalue = {np.min(eigvals):.3e}).")
+    trace_val = np.trace(rho).real
+    if abs(trace_val - 1.0) > tol:
+        print(f"Warning: Tr(rho) = {trace_val:.6f} (should be 1).")
+        valid = False
+    elif verbose:
+        print(f"Tr(rho) = {trace_val:.6f}.")
+    return valid
+
+def check_ppt_condition(rho, dims, tol=1e-9, verbose=False):
+    rho_pt = partial_transpose(rho, dims, subsystem='B')
+    eigenvals = np.linalg.eigvalsh(rho_pt)
+    min_eig = np.min(eigenvals)
+    if verbose:
+        print(f"PPT eigenvalues: {eigenvals}")
+    if min_eig < -tol:
+        print(f"Warning: PPT condition violated (min eigenvalue = {min_eig:.3e}).")
+    else:
+        if verbose:
+            print("PPT condition satisfied.")
+
+def check_povms(povm_sets, tol=1e-9, verbose=False):
+    all_valid = True
+    for idx, elements in enumerate(povm_sets):
+        dim = elements[0].shape[0]
+        sum_op = np.zeros((dim, dim), dtype=complex)
+        for j, E in enumerate(elements):
+            if not np.allclose(E, E.conj().T, atol=tol):
+                print(f"Warning: POVM set {idx}, element {j} not Hermitian.")
+                all_valid = False
+            vals = np.linalg.eigvalsh(E)
+            if np.min(vals) < -tol:
+                print(f"Warning: POVM set {idx}, element {j} not PSD (min eigen = {np.min(vals):.3e}).")
+                all_valid = False
+            sum_op = sum_op + E
+        I = np.eye(dim)
+        if not np.allclose(sum_op, I, atol=tol):
+            diff = np.linalg.norm(sum_op - I)
+            print(f"Warning: POVM set {idx} does not sum to identity (||ΣE - I|| = {diff:.3e}).")
+            all_valid = False
+        if verbose:
+            print(f"POVM set {idx}: Sum operator trace = {np.trace(sum_op):.3f}")
+    return all_valid
+
 
 
 def SeeSaw_PPT_family(d, n=1000):
@@ -290,5 +363,26 @@ def SeeSaw_PPT_family(d, n=1000):
 
     return global_max, global_alice, global_bob
 
+
+def test_seesaw_algorithm( d, n=1000, max_iter=15, tol=1e-6, verbose=False):
+    print("Running SeeSaw algorithm...")
+    global_max, alice_POVM, bob_POVM = SeeSaw_PPT_family( d, n)
+    G = construct_G(alice_POVM, bob_POVM,d)
+    rho = optimize_rho_TB(G, d)
+    print("\n--- Validity Checks ---")
+    print("Checking density matrix rho...")
+    dm_valid = check_density_matrix(rho, verbose=verbose, tol=tol)
+    print("Checking PPT condition on rho...")
+    check_ppt_condition(rho, (d, d), verbose=verbose, tol=tol)
+    print("Checking POVMs for Alice...")
+    alice_valid = check_povms(alice_POVM, verbose=verbose, tol=tol)
+    print("Checking POVMs for Bob...")
+    bob_valid = check_povms(bob_POVM, verbose=verbose, tol=tol)
+    if dm_valid and alice_valid and bob_valid:
+        print("All validity checks passed.")
+    else:
+        print("Some validity checks FAILED. Please review the warnings above.")
+    return rho, alice_POVM, bob_POVM
+
 if __name__ == "__main__":
-    SeeSaw_PPT_family(sys.argv[1],sys.argv[2])
+    print(test_seesaw_algorithm(int(sys.argv[1]),int(sys.argv[2])))
