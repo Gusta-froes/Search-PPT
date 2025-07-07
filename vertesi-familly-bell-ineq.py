@@ -2,21 +2,18 @@ import numpy as np
 import qutip
 import cvxpy as cp
 import sys
+from toqito.rand import random_povm
+
 
 def random_POVM_partie(n_settings, n_outcomes, d=4):
     #Sort random a POVM for one partie and return as a list such that: POVM[x][a] = M_{a|x}
     POVM = []
-    for _ in range(n_settings):
-        POVM_i = []
-        for _ in range(n_outcomes-1):
+    povm_ndarray = random_povm(d, n_settings, n_outcomes)
 
-            POVM_i.append(qutip.rand_dm(d).full())
-        
-        POVM_i.append(np.identity(d) - sum(POVM_i))
-
-
-
-        POVM.append(POVM_i)
+    POVM = [
+    [ povm_ndarray[:, :, a, x] for a in range(n_outcomes) ]
+    for x in range(n_settings)
+]
     
     return POVM
 
