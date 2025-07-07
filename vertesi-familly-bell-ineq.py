@@ -196,42 +196,26 @@ def SDP_bob (alice_POVM, rho,d = 4):
     return optimized_bob_POVM
 
 
-
 # This function optimizes rho s.t. it is PPT
 def optimize_rho_TB(G, d=4):
 
     d_total = d**2
     rho = cp.Variable((d_total, d_total), hermitian=True)
-    sigma = cp.Variable((d_total, d_total), hermitian=True)  # Will represent rho^(T_B)
+    rho_pt = cp.partial_transpose(rho, dims=[d, d], axis=1)
+
 
     constraints = [
         rho >> 0,             # rho is PSD
-        sigma >> 0,           # PT_B(rho) is PSD
-        cp.trace(rho) == 1    # Trace normalization
+        rho_pt >> 0,           # PT_B(rho) is PSD
+        cp.trace(rho) == 1    # Trace normalization 
     ]
-
-    # Impose sigma = PT_B(rho): swap subsystem B indices in the matrix representation.
-    for iA in range(d):
-        for iB in range(d):
-            for jA in range(d):
-                for jB in range(d):
-                    # Original indices in rho corresponding to |iA,iB><jA,jB|
-                    orig_row = iA * d + iB
-                    orig_col = jA * d + jB
-
-                    # For T_B: swap the B indices between bra and ket.
-                    # New row corresponds to |iA,jB> and new col to |jA,iB>.
-                    pt_row = iA * d + jB
-                    pt_col = jA * d + iB
-
-                    constraints.append(sigma[pt_row, pt_col] == rho[orig_row, orig_col])
-
     objective = cp.Maximize(cp.real(cp.trace(G @ rho)))
     prob = cp.Problem(objective, constraints)
     prob.solve(solver = cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 8})
 
 
     return rho.value
+
 
 
 def partial_transpose(rho, dims, subsystem='B'):
@@ -331,9 +315,13 @@ def SeeSaw_PPT_family(d, n=1000):
         count = 0
         while True:
             alice_povm = SDP_alice(bob_povm, rho, d)
+            G = construct_G(alice_povm, bob_povm, d)
+            rho = optimize_rho_TB(G, d)
+
             bob_povm = SDP_bob(alice_povm, rho, d)
             G = construct_G(alice_povm, bob_povm, d)
             rho = optimize_rho_TB(G, d)
+            
             result = np.trace(rho @ G)
 
 
