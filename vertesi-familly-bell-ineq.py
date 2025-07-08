@@ -4,14 +4,13 @@ import cvxpy as cp
 import sys
 from toqito.rand import random_povm
 
-
 def random_POVM_partie(n_settings, n_outcomes, d=4):
     #Sort random a POVM for one partie and return as a list such that: POVM[x][a] = M_{a|x}
     POVM = []
     povm_ndarray = random_povm(d, n_settings, n_outcomes)
 
     POVM = [
-    [ povm_ndarray[:, :, a, x] for a in range(n_outcomes) ]
+    [ povm_ndarray[:, :, x, a] for a in range(n_outcomes) ]
     for x in range(n_settings)
 ]
     
@@ -39,23 +38,35 @@ def general_kron(a, b):
     return full_expr
 
 
-def construct_G(alice_povm, bob_povm, d, general_kron_var = False):
-    # Contruct the bell operator G from the family of inequalities described in https://arxiv.org/pdf/1704.08600
+def construct_G(alice_povm, bob_povm, d, general_kron_var = False, vertesi = True):
+    # if vertesi Contruct the bell operator G from the family of inequalities described in https://arxiv.org/pdf/1704.08600
     # Uses the general kron function if we are dealing with an CVXPY experession
-    if not general_kron_var:
-        G = (d-2)*(np.kron(alice_povm[0][0],bob_povm[1][0]) -  np.kron(alice_povm[0][0],bob_povm[0][0]))
-        for i in range(1,d):
-            G += -np.kron(alice_povm[i][1], bob_povm[1][0])
-            for j in range(1,d):
-                if i!=j:    
-                    G += -np.kron(alice_povm[i][0], bob_povm[0][j])
+    if vertesi:                        
+        if not general_kron_var:
+
+            G = (d-2)*(np.kron(alice_povm[0][0],bob_povm[1][0]) -  np.kron(alice_povm[0][0],bob_povm[0][0]))
+            
+            for i in range(1,d):
+                
+                G += -(np.kron(np.identity(d), bob_povm[1][0]) - np.kron(alice_povm[i][0], bob_povm[1][0]))
+
+                for j in range(1,d):
+                    if i!=j:    
+                        G += -np.kron(alice_povm[i][0], bob_povm[0][j])
+        else:
+
+            G = (d-2)*(general_kron(alice_povm[0][0],bob_povm[1][0]) -  general_kron(alice_povm[0][0],bob_povm[0][0]))
+            
+            for i in range(1,d):
+                
+                G += -(general_kron(np.identity(d), bob_povm[1][0]) - general_kron(alice_povm[i][0], bob_povm[1][0]))
+
+                
+                for j in range(1,d):
+                    if i!=j:
+                        G += -general_kron(alice_povm[i][0], bob_povm[0][j])
     else:
-        G = (d-2)*(general_kron(alice_povm[0][0],bob_povm[1][0]) -  general_kron(alice_povm[0][0],bob_povm[0][0]))
-        for i in range(1,d):
-            G += -general_kron(alice_povm[i][1], bob_povm[1][0])
-            for j in range(1,d):
-                if i!=j:
-                    G += -general_kron(alice_povm[i][0], bob_povm[0][j])
+        G = 0
         
     return G
 
@@ -196,6 +207,7 @@ def SDP_bob (alice_POVM, rho,d = 4):
     return optimized_bob_POVM
 
 
+
 # This function optimizes rho s.t. it is PPT
 def optimize_rho_TB(G, d=4):
 
@@ -215,7 +227,6 @@ def optimize_rho_TB(G, d=4):
 
 
     return rho.value
-
 
 
 def partial_transpose(rho, dims, subsystem='B'):
@@ -307,33 +318,39 @@ def SeeSaw_PPT_family(d, n=1000):
         rho = optimize_rho_TB(G, d)
 
         # Calculate the initial result and initialize tracking variables
-        maximal_result = np.trace(rho @ G)
+        maximal_result = -10
+        result = -10
         maximal_alice = alice_povm
         maximal_bob = bob_povm
 
         # Loop until convergence
         count = 0
+        results = []
         while True:
+            
             alice_povm = SDP_alice(bob_povm, rho, d)
-            G = construct_G(alice_povm, bob_povm, d)
-            rho = optimize_rho_TB(G, d)
-
+            
             bob_povm = SDP_bob(alice_povm, rho, d)
             G = construct_G(alice_povm, bob_povm, d)
             rho = optimize_rho_TB(G, d)
             
+            previous_result = result
             result = np.trace(rho @ G)
+            results.append(result.real)
 
+            if abs(result.real - previous_result)/abs(previous_result) <= 1e-4 or  count >= 15:
+                if result >= maximal_result:
+                    maximal_result = result
+                    maximal_bob = bob_povm
+                    maximal_alice = alice_povm
+                break
+            count += 1
 
             if result >= maximal_result:
                 maximal_result = result
                 maximal_bob = bob_povm
                 maximal_alice = alice_povm
-
-            if count >= 5:
-                break
-            count += 1
-
+        
         if maximal_result > global_max:
             global_max = maximal_result
             global_bob = maximal_bob
@@ -341,7 +358,7 @@ def SeeSaw_PPT_family(d, n=1000):
 
         #print for saninty
         if inter%10 == 0:
-            print(f"{inter}-interation, Maximal violation found: {global_max}, current value: {maximal_result} ")
+            print(f"{inter}-interation, Maximal violation found: {global_max}, current value: {maximal_result}, with results: \n {results}")
 
 
         
