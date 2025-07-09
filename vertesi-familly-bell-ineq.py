@@ -19,10 +19,10 @@ def random_POVM_partie(n_settings, n_outcomes, d=4):
     POVM = []
     povm_ndarray = random_povm(d, n_settings, n_outcomes)
 
-    POVM = [
-    [ povm_ndarray[:, :, x, a].real for a in range(n_outcomes) ]
-    for x in range(n_settings)
-]
+    POVM = [[0.5*(M + M.conj().T)            
+         for M in povm_ndarray[:, :, x, :].transpose(2,0,1)]
+         for x in range(n_settings)]
+
     return POVM
 
 def general_kron(a, b):
