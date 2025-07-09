@@ -135,11 +135,8 @@ def construct_G(alice_povm, bob_povm, d):
     return G
 
 def _evaluate_point(arg):
-    d, x0, x1, phi = arg
-    if x0**2 + x1**2 > 1:
-        return None
+    d, x0, x1, x2, phi = arg
     t = thetas_vertesi(d)
-    x2 = np.sqrt(1 - x0**2 - x1**2)
     x = [x0, x1, x2]
     y = [np.cos(phi), np.sin(phi)]
     ap, bp = generate_operators(t, x, y, d)
@@ -155,15 +152,14 @@ def brute_force_opt_parallel(d, grid=20, phi_pts=20, x_rng=(0.0, 1.0), workers=N
     phis = np.linspace(0, 2 * np.pi, phi_pts, endpoint=False)
     tasks = []
     for x1, x2, phi in itertools.product(x1s, x2s, phis):
-        if x1**2 + x2**2 > 1:
+        rad = 1 - x1**2 - x2**2
+        if rad < 0:
             continue
-        x0 = np.sqrt(1 - x1**2 - x2**2)
-        tasks.append((d, x0, x1, phi))
+        x0 = np.sqrt(rad)
+        tasks.append((d, x0, x1, x2, phi))
     best = {"value": -np.inf}
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
         for idx, res in enumerate(pool.map(_evaluate_point, tasks), 1):
-            if res is None:
-                continue
             v, x, y = res
             if v > best["value"]:
                 best.update({"value": v, "x": x, "y": y})
