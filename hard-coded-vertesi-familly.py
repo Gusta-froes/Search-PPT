@@ -1,6 +1,8 @@
+import sys, os, itertools, argparse, datetime, concurrent.futures
 import numpy as np
 import cvxpy as cp
-import sys
+
+
 
 
 def thetas_vertesi(d):
@@ -114,7 +116,7 @@ def optimize_rho_TB(G, d=4):
     ]
     objective = cp.Maximize(cp.real(cp.trace(G @ rho)))
     prob = cp.Problem(objective, constraints)
-    prob.solve(solver = cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 8})
+    prob.solve(solver = cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 1})
 
 
     return rho.value
@@ -132,34 +134,49 @@ def construct_G(alice_povm, bob_povm, d):
                 G += -np.kron(alice_povm[i][0], bob_povm[0][j])
     return G
 
-def brute_force_opt(d, grid_points=20, angle_points=20):
-    theta = thetas_vertesi(d)
-    best = {'value': -np.inf, 'x': None, 'y': None}
-    grid = np.linspace(0, 1, grid_points)
-    total = grid_points**2 * angle_points
-    count = 0
-    for x0 in grid:
-        for x1 in grid:
-            if x0**2 + x1**2 > 1:
-                count += angle_points
+def _evaluate_point(arg):
+    d, x0, x1, phi = arg
+    if x0**2 + x1**2 > 1:
+        return None
+    t = thetas_vertesi(d)
+    x2 = np.sqrt(1 - x0**2 - x1**2)
+    x = [x0, x1, x2]
+    y = [np.cos(phi), np.sin(phi)]
+    ap, bp = generate_operators(t, x, y, d)
+    G = construct_G(ap, bp, d)
+    rho = optimize_rho_TB(G, d)
+    v = np.real(np.trace(G @ rho))
+    return v, x, y
+
+
+def brute_force_opt_parallel(d, grid=20, phi_pts=20, x_rng=(0.0, 1.0), workers=None):
+    xs = np.linspace(*x_rng, grid)
+    phis = np.linspace(0, 2 * np.pi, phi_pts, endpoint=False)
+    tasks = [(d, x0, x1, phi) for x0, x1, phi in itertools.product(xs, xs, phis)]
+    best = {"value": -np.inf}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+        for idx, res in enumerate(pool.map(_evaluate_point, tasks), 1):
+            if res is None:
                 continue
-            x2 = np.sqrt(1 - x0**2 - x1**2)
-            x = [x0, x1, x2]
-            for phi in np.linspace(0, 2 * np.pi, angle_points):
-                y0 = np.cos(phi)
-                y1 = np.sin(phi)
-                y = [y0, y1]
-                alice_povm, bob_povm = generate_operators(theta, x, y, d)
-                G = construct_G(alice_povm, bob_povm, d)
-                rho_opt = optimize_rho_TB(G, d)
-                val = np.real(np.trace(G @ rho_opt))
-                count += 1
-                if val > best['value']:
-                    best.update({'value': val, 'x': x, 'y': y})
-                    print(f"[{count}/{total}] New best violation: {val:.6f} at x={x}, y={y}")
+            v, x, y = res
+            if v > best["value"]:
+                best.update({"value": v, "x": x, "y": y})
+                ts = datetime.datetime.now().isoformat(timespec="seconds")
+                print(f"[{idx}/{len(tasks)}] {ts}  best: {v:.6f}  x={x}  y={y}")
     return best
 
+
+def parse_cli():
+    p = argparse.ArgumentParser()
+    p.add_argument("d", type=int)
+    p.add_argument("--grid", type=int, default=20)
+    p.add_argument("--phi", type=int, default=20)
+    p.add_argument("--x-range", type=float, nargs=2, default=(0.0, 1.0))
+    p.add_argument("--workers", type=int, default=os.cpu_count())
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    d = sys.argv[1]
-    x_points, y_points = sys.argv[2], sys.argv[3]
-    brute_force_opt(d,x_points,y_points)
+    a=parse_cli()
+    r=brute_force_opt_parallel(a.d,a.grid,a.phi,tuple(a.x_range),a.workers)
+    print("\nBest violation found:",r)
