@@ -18,7 +18,11 @@ def random_POVM_partie(n_settings, n_outcomes, d=4):
     #Sort random a POVM for one partie and return as a list such that: POVM[x][a] = M_{a|x}
     POVM = []
     povm_ndarray = random_povm(d, n_settings, n_outcomes)
-    POVM = [[povm_ndarray[:, :, x, a] for a in range(n_outcomes)] for x in range(n_settings)]
+
+    POVM = [
+    [ povm_ndarray[:, :, x, a].real for a in range(n_outcomes) ]
+    for x in range(n_settings)
+]
     return POVM
 
 def general_kron(a, b):
@@ -61,14 +65,14 @@ def construct_G(alice_povm, bob_povm, d, general_kron_var=False, vertesi=True):
     return G
 
 def ptrace_A(mat, d):
-    result = np.zeros((d, d), dtype=complex)
+    result = np.zeros((d, d))
     reshaped = mat.reshape(d, d, d, d)
     for i in range(d):
         result += reshaped[i, :, i, :]
     return result
 
 def ptrace_B(mat, d):
-    result = np.zeros((d, d), dtype=complex)
+    result = np.zeros((d, d))
     reshaped = mat.reshape(d, d, d, d)
     for j in range(d):
         result += reshaped[:, j, :, j]
@@ -82,7 +86,7 @@ def SDP_alice(bob_POVM, rho, d=4):
     for _ in range(X):
         alice_POVM_x = []
         for _ in range(A):
-            alice_POVM_x.append(cp.Variable((d, d), hermitian=True))
+            alice_POVM_x.append(cp.Variable((d, d), symmetric=True))
         alice_POVM.append(alice_POVM_x)
     # Define objective function: 
     B10 = bob_POVM[1][0]
@@ -95,7 +99,7 @@ def SDP_alice(bob_POVM, rho, d=4):
         coeff.append(ptrace_B(np.kron(I_d, s) @ rho, d))
     expr = 0
     for x in range(X):
-        expr += cp.real(cp.trace(alice_POVM[x][0] @ coeff[x]))
+        expr += cp.trace(alice_POVM[x][0] @ coeff[x])
     obj = cp.Maximize(expr)
     PSD_constraints = []
     for settings in alice_POVM:
@@ -114,7 +118,7 @@ def SDP_alice(bob_POVM, rho, d=4):
     for x in range(X):
         povm_x = []
         for a in range(A):
-            povm_x.append(alice_POVM[x][a].value)
+            povm_x.append(np.real_if_close(alice_POVM[x][a].value))
         optimized_alice_POVM.append(povm_x)
     return optimized_alice_POVM
 
@@ -123,11 +127,11 @@ def SDP_bob(alice_POVM, rho, d=4):
     bob_POVM = []
     bob_POVM_d_outcome = []
     for _ in range(d):
-        bob_POVM_d_outcome.append(cp.Variable((d, d), hermitian=True))
+        bob_POVM_d_outcome.append(cp.Variable((d, d), symmetric=True))
     bob_POVM.append(bob_POVM_d_outcome)
     bob_POVM_two_outcome = []
     for _ in range(2):
-        bob_POVM_two_outcome.append(cp.Variable((d, d), hermitian=True))
+        bob_POVM_two_outcome.append(cp.Variable((d, d), symmetric=True))
     bob_POVM.append(bob_POVM_two_outcome)
     # Define objective function:
     A0 = alice_POVM[0][0]
@@ -139,9 +143,9 @@ def SDP_bob(alice_POVM, rho, d=4):
     coeff_0.append(ptrace_A(np.kron(-(d - 2) * A0, I_d) @ rho, d))
     for j in range(1, d):
         coeff_0.append(ptrace_A(np.kron(-sum(As[k] for k in range(d - 1) if k != j - 1), I_d) @ rho, d))
-    expr = cp.real(cp.trace(bob_POVM[1][0] @ coeff_10))
+    expr = cp.trace(bob_POVM[1][0] @ coeff_10)
     for j in range(d):
-        expr += cp.real(cp.trace(bob_POVM[0][j] @ coeff_0[j]))
+        expr += cp.trace(bob_POVM[0][j] @ coeff_0[j])
     obj = cp.Maximize(expr)
     PSD_constraints = []
     for settings in bob_POVM:
@@ -159,23 +163,24 @@ def SDP_bob(alice_POVM, rho, d=4):
     optimized_bob_POVM = []
     povm_d_outcome = []
     for b in range(d):
-        povm_d_outcome.append(bob_POVM[0][b].value)
+        povm_d_outcome.append(np.real_if_close(bob_POVM[0][b].value))
     optimized_bob_POVM.append(povm_d_outcome)
     povm_two_outcome = []
     for b in range(2):
-        povm_two_outcome.append(bob_POVM[1][b].value)
+        povm_two_outcome.append(np.real_if_close(bob_POVM[1][b].value))
     optimized_bob_POVM.append(povm_two_outcome)
     return optimized_bob_POVM
 
+# This function optimizes rho s.t. it is PPT
 def optimize_rho_TB(G, d=4):
     d_total = d ** 2
-    rho = cp.Variable((d_total, d_total), hermitian=True)
+    rho = cp.Variable((d_total, d_total), symmetric=True)
     rho_pt = cp.partial_transpose(rho, dims=[d, d], axis=1)
-    constraints = [rho >> 0, rho_pt >> 0, cp.trace(rho) == 1]
-    objective = cp.Maximize(cp.real(cp.trace(G @ rho)))
+    constraints = [rho >> 0, rho_pt >> 1e-9*np.eye(d*d), cp.trace(rho) == 1]
+    objective = cp.Maximize(cp.trace(G @ rho))
     prob = cp.Problem(objective, constraints)
     prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
-    return rho.value
+    return np.real_if_close(rho.value)
 
 def partial_transpose(rho, dims, subsystem='B'):
     # Return the partial transpose of density matrix rho on the given subsystem.
@@ -191,19 +196,19 @@ def partial_transpose(rho, dims, subsystem='B'):
 
 def check_density_matrix(rho, tol=1e-9, verbose=False):
     valid = True
-    if not np.allclose(rho, rho.conj().T, atol=tol):
-        max_diff = np.max(np.abs(rho - rho.conj().T))
-        print(f"Warning: rho is not Hermitian (max diff = {max_diff:.3e}).")
+    if not np.allclose(rho, rho.T, atol=tol):
+        max_diff = np.max(np.abs(rho - rho.T))
+        print(f"Warning: rho is not symmetric (max diff = {max_diff:.3e}).")
         valid = False
     elif verbose:
-        print("rho is Hermitian.")
+        print("rho is symmetric.")
     eigvals = np.linalg.eigvalsh(rho)
     if np.min(eigvals) < -tol:
         print(f"Warning: rho is not PSD (min eigenvalue = {np.min(eigvals):.3e}).")
         valid = False
     elif verbose:
         print(f"rho is PSD (min eigenvalue = {np.min(eigvals):.3e}).")
-    trace_val = np.trace(rho).real
+    trace_val = np.trace(rho)
     if abs(trace_val - 1.0) > tol:
         print(f"Warning: Tr(rho) = {trace_val:.6f} (should be 1).")
         valid = False
@@ -227,10 +232,10 @@ def check_povms(povm_sets, tol=1e-9, verbose=False):
     all_valid = True
     for idx, elements in enumerate(povm_sets):
         dim = elements[0].shape[0]
-        sum_op = np.zeros((dim, dim), dtype=complex)
+        sum_op = np.zeros((dim, dim))
         for j, E in enumerate(elements):
-            if not np.allclose(E, E.conj().T, atol=tol):
-                print(f"Warning: POVM set {idx}, element {j} not Hermitian.")
+            if not np.allclose(E, E.T, atol=tol):
+                print(f"Warning: POVM set {idx}, element {j} not symmetric.")
                 all_valid = False
             vals = np.linalg.eigvalsh(E)
             if np.min(vals) < -tol:
@@ -265,8 +270,8 @@ def _single_restart(args):
         rho = optimize_rho_TB(G, d)
         previous_result = result
         result = np.trace(rho @ G)
-        results.append(result.real)
-        if abs(result.real - previous_result) / abs(previous_result) <= 1e-4 or count >= 50:
+        results.append(result)
+        if abs(result - previous_result) / abs(previous_result) <= 1e-4 or count >= 50:
             if result >= maximal_result:
                 maximal_result = result
                 maximal_bob = bob_povm
