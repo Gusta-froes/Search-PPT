@@ -3,20 +3,23 @@ import qutip
 import cvxpy as cp
 import sys
 from toqito.rand import random_povm
+import concurrent.futures as fut
+
+MOSEK_PARAMS = {
+    "MSK_IPAR_NUM_THREADS": 1,
+    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10
+}
 
 def random_POVM_partie(n_settings, n_outcomes, d=4):
     #Sort random a POVM for one partie and return as a list such that: POVM[x][a] = M_{a|x}
     POVM = []
     povm_ndarray = random_povm(d, n_settings, n_outcomes)
-
-    POVM = [
-    [ povm_ndarray[:, :, x, a] for a in range(n_outcomes) ]
-    for x in range(n_settings)
-]
-    
+    POVM = [[povm_ndarray[:, :, x, a] for a in range(n_outcomes)] for x in range(n_settings)]
     return POVM
-
-
 
 def general_kron(a, b):
     """
@@ -27,212 +30,155 @@ def general_kron(a, b):
     :param a: 2D numpy ndarray, or a CVXPY Variable with a.ndim == 2
     :param b: 2D numpy ndarray, or a CVXPY Variable with b.ndim == 2
     """
-    
-    
-    # np.kron does not work for a CVXPY variable as argument (weird dimensions problem), got this implementation from: https://github.com/cvxpy/cvxpy/issues/457
-    
-    expr = np.kron(a, b)
-    num_rows = expr.shape[0]
-    rows = [cp.hstack(expr[i,:]) for i in range(num_rows)]
-    full_expr = cp.vstack(rows)
-    return full_expr
+    if isinstance(a, cp.Expression) or isinstance(b, cp.Expression):
+        if not isinstance(a, cp.Expression):
+            a = cp.Constant(a)
+        if not isinstance(b, cp.Expression):
+            b = cp.Constant(b)
+        return cp.kron(a, b)
+    return np.kron(a, b)
 
-
-def construct_G(alice_povm, bob_povm, d, general_kron_var = False, vertesi = True):
+def construct_G(alice_povm, bob_povm, d, general_kron_var=False, vertesi=True):
     # if vertesi Contruct the bell operator G from the family of inequalities described in https://arxiv.org/pdf/1704.08600
     # Uses the general kron function if we are dealing with an CVXPY experession
-    if vertesi:                        
+    if vertesi:
         if not general_kron_var:
-
-            G = (d-2)*(np.kron(alice_povm[0][0],bob_povm[1][0]) -  np.kron(alice_povm[0][0],bob_povm[0][0]))
-            
-            for i in range(1,d):
-                
+            G = (d - 2) * (np.kron(alice_povm[0][0], bob_povm[1][0]) - np.kron(alice_povm[0][0], bob_povm[0][0]))
+            for i in range(1, d):
                 G += -(np.kron(np.identity(d), bob_povm[1][0]) - np.kron(alice_povm[i][0], bob_povm[1][0]))
-
-                for j in range(1,d):
-                    if i!=j:    
+                for j in range(1, d):
+                    if i != j:
                         G += -np.kron(alice_povm[i][0], bob_povm[0][j])
         else:
-
-            G = (d-2)*(general_kron(alice_povm[0][0],bob_povm[1][0]) -  general_kron(alice_povm[0][0],bob_povm[0][0]))
-            
-            for i in range(1,d):
-                
+            G = (d - 2) * (general_kron(alice_povm[0][0], bob_povm[1][0]) - general_kron(alice_povm[0][0], bob_povm[0][0]))
+            for i in range(1, d):
                 G += -(general_kron(np.identity(d), bob_povm[1][0]) - general_kron(alice_povm[i][0], bob_povm[1][0]))
-
-                
-                for j in range(1,d):
-                    if i!=j:
+                for j in range(1, d):
+                    if i != j:
                         G += -general_kron(alice_povm[i][0], bob_povm[0][j])
     else:
         G = 0
-        
     return G
 
-def SDP_alice (bob_POVM, rho,d = 4):
+def ptrace_A(mat, d):
+    result = np.zeros((d, d), dtype=complex)
+    reshaped = mat.reshape(d, d, d, d)
+    for i in range(d):
+        result += reshaped[i, :, i, :]
+    return result
+
+def ptrace_B(mat, d):
+    result = np.zeros((d, d), dtype=complex)
+    reshaped = mat.reshape(d, d, d, d)
+    for j in range(d):
+        result += reshaped[:, j, :, j]
+    return result
+
+def SDP_alice(bob_POVM, rho, d=4):
     # Define variables to be optimized
     X = d
     A = 2
     alice_POVM = []
     for _ in range(X):
-
         alice_POVM_x = []
-
         for _ in range(A):
-
-            alice_POVM_x.append(cp.Variable((d,d),  hermitian=True))
-        
+            alice_POVM_x.append(cp.Variable((d, d), hermitian=True))
         alice_POVM.append(alice_POVM_x)
-    
     # Define objective function: 
-    G = construct_G(alice_POVM,bob_POVM,d, general_kron_var = True)
-
-    obj = cp.Maximize(cp.real(cp.trace(G@rho))) # We need the real part because the maximization cant be done with a complex variable (even if the imaginary part is zero)
-
-    # Define the POVM constraint
-    # First the positive semi definite constraint
+    B10 = bob_POVM[1][0]
+    B0 = bob_POVM[0]
+    coeff = []
+    I_d = np.identity(d)
+    coeff.append((d - 2) * ptrace_B(np.kron(I_d, B10 - B0[0]) @ rho, d))
+    for i in range(1, d):
+        s = B10 - sum(B0[j] for j in range(1, d) if j != i)
+        coeff.append(ptrace_B(np.kron(I_d, s) @ rho, d))
+    expr = 0
+    for x in range(X):
+        expr += cp.real(cp.trace(alice_POVM[x][0] @ coeff[x]))
+    obj = cp.Maximize(expr)
     PSD_constraints = []
     for settings in alice_POVM:
         for measurement in settings:
-            PSD_constraints.append(  measurement  >> 0  )
-    
-    # POVM constraint
-
+            PSD_constraints.append(measurement >> 0)
     POVM_constraints = []
     for settings in alice_POVM:
         S = 0
         for measurement in settings:
             S += measurement
-
-        POVM_constraints.append( S - np.identity(d) == 0)
-
+        POVM_constraints.append(S - np.identity(d) == 0)
     constraints = PSD_constraints + POVM_constraints
-
-    # Define the problem:
-
     prob = cp.Problem(obj, constraints)
-    prob.solve(solver=cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 8})  # Returns the optimal value.
-
-
-
+    prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
     optimized_alice_POVM = []
     for x in range(X):
         povm_x = []
         for a in range(A):
             povm_x.append(alice_POVM[x][a].value)
         optimized_alice_POVM.append(povm_x)
-    
     return optimized_alice_POVM
 
-
-def SDP_bob (alice_POVM, rho,d = 4):
-
-   
-
-
+def SDP_bob(alice_POVM, rho, d=4):
     # Define variables to be optimized
-
     bob_POVM = []
-    
-    # d-outcome setting:
     bob_POVM_d_outcome = []
-
     for _ in range(d):
-
-        bob_POVM_d_outcome.append(cp.Variable((d,d),  hermitian=True))
-    
+        bob_POVM_d_outcome.append(cp.Variable((d, d), hermitian=True))
     bob_POVM.append(bob_POVM_d_outcome)
-
-    # two-outcome setting:
-
     bob_POVM_two_outcome = []
-
     for _ in range(2):
-
-        bob_POVM_two_outcome.append(cp.Variable((d,d),  hermitian=True))
-    
+        bob_POVM_two_outcome.append(cp.Variable((d, d), hermitian=True))
     bob_POVM.append(bob_POVM_two_outcome)
-
-
     # Define objective function:
-
-    G = construct_G(alice_POVM, bob_POVM, d, general_kron_var = True)
-
-    obj = cp.Maximize(cp.real(cp.trace(G@rho))) # We need the real part because the maximization cant be done with a complex variable (even if the imaginary part is zero)
-
-    # Define the POVM constraint
-    # First the positive semi definite constraint
+    A0 = alice_POVM[0][0]
+    As = [alice_POVM[i][0] for i in range(1, d)]
+    I_d = np.identity(d)
+    S10 = (d - 2) * A0 + sum(As) - (d - 1) * I_d
+    coeff_10 = ptrace_A(np.kron(S10, I_d) @ rho, d)
+    coeff_0 = []
+    coeff_0.append(ptrace_A(np.kron(-(d - 2) * A0, I_d) @ rho, d))
+    for j in range(1, d):
+        coeff_0.append(ptrace_A(np.kron(-sum(As[k] for k in range(d - 1) if k != j - 1), I_d) @ rho, d))
+    expr = cp.real(cp.trace(bob_POVM[1][0] @ coeff_10))
+    for j in range(d):
+        expr += cp.real(cp.trace(bob_POVM[0][j] @ coeff_0[j]))
+    obj = cp.Maximize(expr)
     PSD_constraints = []
     for settings in bob_POVM:
         for measurement in settings:
-            PSD_constraints.append(  measurement >> 0  )
-
-
-
-    
-    # POVM constraint
-
+            PSD_constraints.append(measurement >> 0)
     POVM_constraints = []
     for settings in bob_POVM:
         S = 0
         for measurement in settings:
             S += measurement
-
-        POVM_constraints.append( S - np.identity(d) == 0)
-    
-    
-
+        POVM_constraints.append(S - np.identity(d) == 0)
     constraints = POVM_constraints + PSD_constraints
-
-    # Define the problem:
-
     prob = cp.Problem(obj, constraints)
-    prob.solve(solver = cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 8})  # Returns the optimal value.
-
-
+    prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
     optimized_bob_POVM = []
-    # d-outcome setting unpacking
     povm_d_outcome = []
     for b in range(d):
         povm_d_outcome.append(bob_POVM[0][b].value)
     optimized_bob_POVM.append(povm_d_outcome)
-    
-    # two-outcome setting unpacking
     povm_two_outcome = []
     for b in range(2):
         povm_two_outcome.append(bob_POVM[1][b].value)
     optimized_bob_POVM.append(povm_two_outcome)
-
     return optimized_bob_POVM
 
-
-
-# This function optimizes rho s.t. it is PPT
 def optimize_rho_TB(G, d=4):
-
-    d_total = d**2
+    d_total = d ** 2
     rho = cp.Variable((d_total, d_total), hermitian=True)
     rho_pt = cp.partial_transpose(rho, dims=[d, d], axis=1)
-
-
-    constraints = [
-        rho >> 0,             # rho is PSD
-        rho_pt >> 0,           # PT_B(rho) is PSD
-        cp.trace(rho) == 1    # Trace normalization 
-    ]
+    constraints = [rho >> 0, rho_pt >> 0, cp.trace(rho) == 1]
     objective = cp.Maximize(cp.real(cp.trace(G @ rho)))
     prob = cp.Problem(objective, constraints)
-    prob.solve(solver = cp.MOSEK, mosek_params={"MSK_IPAR_NUM_THREADS": 8})
-
-
+    prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
     return rho.value
 
-
 def partial_transpose(rho, dims, subsystem='B'):
-    """
-    Return the partial transpose of density matrix rho on the given subsystem.
-    """
+    # Return the partial transpose of density matrix rho on the given subsystem.
     dA, dB = dims
     rho_4d = rho.reshape((dA, dB, dA, dB))
     if subsystem == 'B':
@@ -300,76 +246,61 @@ def check_povms(povm_sets, tol=1e-9, verbose=False):
             print(f"POVM set {idx}: Sum operator trace = {np.trace(sum_op):.3f}")
     return all_valid
 
-
-
-def SeeSaw_PPT_family(d, n=1000):
-    global_max = -10
-    for inter in range(n):
-        # Sort POVMs 
-        # Alice has d two outcomes measurements (X = d, A = 2)
-        # Bob has one d-outcome and one two-outcome measurements
-
-        alice_povm = random_POVM_partie(d, 2, d)
-
-        bob_povm = random_POVM_partie(1, d, d) + random_POVM_partie(1,2,d)
-
-        # Construct G and optimize rho
+def _single_restart(args):
+    d, inter = args
+    # Sort POVMs 
+    # Alice has d two outcomes measurements (X = d, A = 2)
+    # Bob has one d-outcome and one two-outcome measurements
+    alice_povm = random_POVM_partie(d, 2, d)
+    bob_povm = random_POVM_partie(1, d, d) + random_POVM_partie(1, 2, d)
+    # Construct G and optimize rho
+    G = construct_G(alice_povm, bob_povm, d)
+    rho = optimize_rho_TB(G, d)
+    # Calculate the initial result and initialize tracking variables
+    maximal_result = -10
+    result = -10
+    maximal_alice = alice_povm
+    maximal_bob = bob_povm
+    # Loop until convergence
+    count = 0
+    results = []
+    while True:
+        alice_povm = SDP_alice(bob_povm, rho, d)
+        bob_povm = SDP_bob(alice_povm, rho, d)
         G = construct_G(alice_povm, bob_povm, d)
         rho = optimize_rho_TB(G, d)
-
-        # Calculate the initial result and initialize tracking variables
-        maximal_result = -10
-        result = -10
-        maximal_alice = alice_povm
-        maximal_bob = bob_povm
-
-        # Loop until convergence
-        count = 0
-        results = []
-        while True:
-            
-            alice_povm = SDP_alice(bob_povm, rho, d)
-            
-            bob_povm = SDP_bob(alice_povm, rho, d)
-            G = construct_G(alice_povm, bob_povm, d)
-            rho = optimize_rho_TB(G, d)
-            
-            previous_result = result
-            result = np.trace(rho @ G)
-            results.append(result.real)
-
-            if abs(result.real - previous_result)/abs(previous_result) <= 1e-4 or  count >= 15:
-                if result >= maximal_result:
-                    maximal_result = result
-                    maximal_bob = bob_povm
-                    maximal_alice = alice_povm
-                break
-            count += 1
-
+        previous_result = result
+        result = np.trace(rho @ G)
+        results.append(result.real)
+        if abs(result.real - previous_result) / abs(previous_result) <= 1e-4 or count >= 50:
             if result >= maximal_result:
                 maximal_result = result
                 maximal_bob = bob_povm
                 maximal_alice = alice_povm
-        
-        if maximal_result > global_max:
-            global_max = maximal_result
-            global_bob = maximal_bob
-            global_alice = maximal_alice
+            break
+        count += 1
+        if result >= maximal_result:
+            maximal_result = result
+            maximal_bob = bob_povm
+            maximal_alice = alice_povm
+    return maximal_result, maximal_alice, maximal_bob
 
-        #print for saninty
-        if inter%10 == 0:
-            print(f"{inter}-interation, Maximal violation found: {global_max}, current value: {maximal_result}, with results: \n {results}")
-
-
-        
-
+def SeeSaw_PPT_family(d, n=1000, max_workers=None):
+    global_max = -10
+    global_alice = None
+    global_bob = None
+    with fut.ProcessPoolExecutor(max_workers=max_workers) as pool:
+        for maximal_result, maximal_alice, maximal_bob in pool.map(_single_restart, [(d, inter) for inter in range(n)]):
+            if maximal_result > global_max:
+                global_max = maximal_result
+                global_alice = maximal_alice
+                global_bob = maximal_bob
     return global_max, global_alice, global_bob
 
-
-def test_seesaw_algorithm( d, n=1000, max_iter=15, tol=1e-6, verbose=False):
+def test_seesaw_algorithm(d, n=1000, max_workers=None, max_iter=15, tol=1e-6, verbose=False):
     print("Running SeeSaw algorithm...")
-    global_max, alice_POVM, bob_POVM = SeeSaw_PPT_family( d, n)
-    G = construct_G(alice_POVM, bob_POVM,d)
+    global_max, alice_POVM, bob_POVM = SeeSaw_PPT_family(d, n, max_workers)
+    G = construct_G(alice_POVM, bob_POVM, d)
     rho = optimize_rho_TB(G, d)
     print("\n--- Validity Checks ---")
     print("Checking density matrix rho...")
@@ -387,4 +318,7 @@ def test_seesaw_algorithm( d, n=1000, max_iter=15, tol=1e-6, verbose=False):
     return rho, alice_POVM, bob_POVM
 
 if __name__ == "__main__":
-    print(test_seesaw_algorithm(int(sys.argv[1]),int(sys.argv[2])))
+    d = int(sys.argv[1])
+    n = int(sys.argv[2])
+    max_workers = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    print(test_seesaw_algorithm(d, n, max_workers))
