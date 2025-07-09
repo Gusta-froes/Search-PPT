@@ -248,20 +248,14 @@ def check_povms(povm_sets, tol=1e-9, verbose=False):
 
 def _single_restart(args):
     d, inter = args
-    # Sort POVMs 
-    # Alice has d two outcomes measurements (X = d, A = 2)
-    # Bob has one d-outcome and one two-outcome measurements
     alice_povm = random_POVM_partie(d, 2, d)
     bob_povm = random_POVM_partie(1, d, d) + random_POVM_partie(1, 2, d)
-    # Construct G and optimize rho
     G = construct_G(alice_povm, bob_povm, d)
     rho = optimize_rho_TB(G, d)
-    # Calculate the initial result and initialize tracking variables
     maximal_result = -10
     result = -10
     maximal_alice = alice_povm
     maximal_bob = bob_povm
-    # Loop until convergence
     count = 0
     results = []
     while True:
@@ -290,11 +284,13 @@ def SeeSaw_PPT_family(d, n=1000, max_workers=None):
     global_alice = None
     global_bob = None
     with fut.ProcessPoolExecutor(max_workers=max_workers) as pool:
-        for maximal_result, maximal_alice, maximal_bob in pool.map(_single_restart, [(d, inter) for inter in range(n)]):
+        for idx, (maximal_result, maximal_alice, maximal_bob) in enumerate(pool.map(_single_restart, [(d, inter) for inter in range(n)]), 1):
             if maximal_result > global_max:
                 global_max = maximal_result
                 global_alice = maximal_alice
                 global_bob = maximal_bob
+            if idx % 10 == 0:
+                print(f"{idx}-iteration, Maximal violation so far: {global_max}")
     return global_max, global_alice, global_bob
 
 def test_seesaw_algorithm(d, n=1000, max_workers=None, max_iter=15, tol=1e-6, verbose=False):
