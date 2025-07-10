@@ -39,14 +39,18 @@ for _ in range(1000):
     
 
 
-def construct_bell_operator(alice_povm,bob_povm,d):
-    G = (d-2)*(np.kron(alice_povm[0][0],bob_povm[1][0] - bob_povm[0][0]))
-    for i in range(1,d):
-        for j in range(1,d):
-            if i!=j:
-                G += -np.kron(alice_povm[i][0],bob_povm[0][j])
-    for i in range(1,d):
-        G += - np.kron(alice_povm[i][1],bob_povm[1][0])
+def construct_bell_operator(alice_povm, bob_povm, d):
+    G = np.zeros((d**2, d**2))
+    G += (d-2) * (np.kron(alice_povm[0][0], bob_povm[1][0] - bob_povm[0][0]))
+    
+    for i in range(1, d):
+        for j in range(1, d):
+            if i != j:
+                G -= np.kron(alice_povm[i][0], bob_povm[0][j])
+                
+    for i in range(1, d):
+        G -= np.kron(alice_povm[i][1], bob_povm[1][0])
+        
     return G
 
 
@@ -71,133 +75,78 @@ MOSEK_PARAMS = {
 }
 
 
-def SDP_alice(rho,bob_povm,d):
-    # Define variables to be optimized
-    X = d
-    A = 2
-    alice_POVM = []
-    for _ in range(X):
-        alice_POVM_x = []
-        for _ in range(A):
-            alice_POVM_x.append(cp.Variable((d, d), symmetric=True))
-        alice_POVM.append(alice_POVM_x)
+def SDP_alice(rho, bob_povm, d):
+    # Precompute marginal operators
+    rho_A_B00 = partial_trace_numpy(rho @ np.kron(np.eye(d), bob_povm[0][0]), d, "B")
+    rho_A_B01 = partial_trace_numpy(rho @ np.kron(np.eye(d), bob_povm[1][0]), d, "B")
+    rho_A_Bj0 = [None] * d
+    for j in range(1, d):
+        rho_A_Bj0[j] = partial_trace_numpy(rho @ np.kron(np.eye(d), bob_povm[0][j]), d, "B")
 
-    #Define objective function
-    
+    # Initialize F_i matrices
+    F = [None] * d
+    F[0] = (d-2) * (rho_A_B01 - rho_A_B00)
+    for i in range(1, d):
+        F[i] = -sum(rho_A_Bj0[j] for j in range(1, d) if j != i) + rho_A_B01
 
-    rho_00 = -(d-2)*partial_trace_numpy(rho@(np.kron(np.identity(d), bob_povm[0][0])),d,"B")
-    rho_00 += (d-2)*partial_trace_numpy(rho@(np.kron(np.identity(d), bob_povm[1][0])),d,"B")
-    
-    rho_0i = [0 for i in range(d)]
-    rho_1i = [0 for i in range(d)]
-    for i in range(1,d):
-        rho_1i[i] += -1*partial_trace_numpy(rho@(np.kron(np.identity(d), bob_povm[1][0])),d,"B")
-        for j in range(1,d):
-            if i !=j:
-                rho_0i[i] += -1*partial_trace_numpy(rho@(np.kron(np.identity(d), bob_povm[0][j])),d,"B")
-
-    expr = 0
-    for x,setting in enumerate(alice_POVM):
-        for a,measurement in enumerate(setting):
-            if a == 0 and x ==0:
-                expr += cp.trace(rho_00@measurement)
-            elif a == 0 and (d-1) >= x >=1 :
-                expr += cp.trace(rho_0i[x]@measurement)
-            elif a == 1 and x!=0:
-                expr += cp.trace(rho_1i[x]@measurement)
-    
-    obj = cp.Maximize(expr)
-
-    PSD_constraints = []
-    for settings in alice_POVM:
-        for measurement in settings:
-            PSD_constraints.append(measurement >> 0)
-    POVM_constraints = []
-    for settings in alice_POVM:
-        S = 0
-        for measurement in settings:
-            S += measurement
-        POVM_constraints.append(S == np.identity(d))
-    constraints = PSD_constraints + POVM_constraints
-    prob = cp.Problem(obj, constraints)
-    prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
-    optimized_alice_POVM = []
-    for x in range(X):
-        povm_x = []
-        for a in range(A):
-            povm_x.append(alice_POVM[x][a].value)
-        optimized_alice_POVM.append(povm_x)
-    return optimized_alice_POVM
-
-
-
-def SDP_bob(rho, alice_povm,d):
-    # Define variables to be optimized
-
-    bob_POVM = []
-    bob_POVM_d_outcome = []
+    # SDP setup
+    alice_povm_vars = []
     for _ in range(d):
-        bob_POVM_d_outcome.append(cp.Variable((d, d), symmetric=True))
-    bob_POVM.append(bob_POVM_d_outcome)
-    bob_POVM_two_outcome = []
-    for _ in range(2):
-        bob_POVM_two_outcome.append(cp.Variable((d, d), symmetric=True))
-    bob_POVM.append(bob_POVM_two_outcome)
+        A0 = cp.Variable((d, d), symmetric=True)
+        alice_povm_vars.append([A0, np.eye(d) - A0])  # A1 = I - A0
 
-    #Define objective function
+    obj = 0
+    for i in range(d):
+        obj += cp.trace(F[i] @ alice_povm_vars[i][0])
     
-
-    rho_00 = -(d-2)*partial_trace_numpy(rho@np.kron(alice_povm[0][0],np.identity(d)),d,"A")
-    rho_01 = (d-2)*partial_trace_numpy(rho@np.kron(alice_povm[0][0],np.identity(d)),d,"A")
-    rho_j0 = [0 for j in range(d)]
-    for i in range(1,d):
-        rho_01 += -1*partial_trace_numpy(rho@np.kron(alice_povm[i][1],np.identity(d)),d,"A")
-        for j in range(1,d):
-            if i !=j:
-                rho_j0[j] += -1*partial_trace_numpy(rho@np.kron(alice_povm[i][0],np.identity(d)),d,"A") 
+    constraints = [A0 >> 0 for i in range(d) for A0 in [alice_povm_vars[i][0]]] + \
+                 [alice_povm_vars[i][0] << np.eye(d) for i in range(d)]
     
-    expr = 0
-    for y,setting in enumerate(bob_POVM):
-        for b,measurement in enumerate(setting):
-            if b == 0 and y ==0:
-                expr += cp.trace(rho_00@measurement)
-            elif b == 0 and y == 1:
-                expr += cp.trace(rho_01@measurement)
-            elif b != 0 and y == 0:
-                expr += cp.trace(rho_j0[b]@measurement)
-    
-    obj = cp.Maximize(expr)
-
-    PSD_constraints = []
-    for settings in bob_POVM:
-        for measurement in settings:
-            PSD_constraints.append(measurement >> 0)
-    POVM_constraints = []
-    for settings in bob_POVM:
-        S = 0
-        for measurement in settings:
-            S += measurement
-        POVM_constraints.append(S  == np.identity(d))
-    constraints = POVM_constraints + PSD_constraints
-    prob = cp.Problem(obj, constraints)
+    prob = cp.Problem(cp.Maximize(obj), constraints)
     prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
-    optimized_bob_POVM = []
-    povm_d_outcome = []
-    for b in range(d):
-        povm_d_outcome.append(bob_POVM[0][b].value)
-    optimized_bob_POVM.append(povm_d_outcome)
-    povm_two_outcome = []
-    for b in range(2):
-        povm_two_outcome.append(bob_POVM[1][b].value)
-    optimized_bob_POVM.append(povm_two_outcome)
-    return optimized_bob_POVM
+        
+    return [[A0[0].value, np.eye(d) - A0[0].value] for A0 in alice_povm_vars]
+
+
+
+def SDP_bob(rho, alice_povm, d):
+    # Precompute marginal operators
+    rho_B_A0i = [None] * d
+    for i in range(d):
+        rho_B_A0i[i] = partial_trace_numpy(rho @ np.kron(alice_povm[i][0], np.eye(d)), d, "A")
+    
+    rho_B_A1i = [None] * d
+    for i in range(1, d):  # Note: i>=1
+        rho_B_A1i[i] = partial_trace_numpy(rho @ np.kron(alice_povm[i][1], np.eye(d)), d, "A")
+
+    # SDP setup
+    B0 = [cp.Variable((d, d), symmetric=True) for _ in range(d)]  # y=0 outcomes
+    C0 = cp.Variable((d, d), symmetric=True)  # y=1 outcome 0
+    C1 = np.eye(d) - C0  # y=1 outcome 1
+
+    # Objective terms
+    obj = 0
+    obj += (d-2) * cp.trace(rho_B_A0i[0].T @ (C0 - B0[0]))
+    for i in range(1, d):
+        for j in range(1, d):
+            if i != j:
+                obj -= cp.trace(rho_B_A0i[i].T @ B0[j])
+    for i in range(1, d):
+        obj -= cp.trace(rho_B_A1i[i].T @ C0)
+
+    constraints = [var >> 0 for var in B0] + [sum(B0) == np.eye(d)] + [C0 >> 0, C1 >> 0]
+    
+    prob = cp.Problem(cp.Maximize(obj), constraints)
+    prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
+    
+    return [[B.value for B in B0], [C0.value, C1.value]]
 
 # This function optimizes rho s.t. it is PPT
 def optimize_rho_TB(G, d):
     d_total = d ** 2
     rho = cp.Variable((d_total, d_total), symmetric=True)
     rho_pt = cp.partial_transpose(rho, dims=[d, d], axis=1)
-    constraints = [rho >> 0, 	rho_pt >> 0, cp.trace(rho) == 1]
+    constraints = [rho >> 0,rho_pt>>0 ,cp.trace(rho) == 1]
     objective = cp.Maximize(cp.trace(G @ rho))
     prob = cp.Problem(objective, constraints)
     prob.solve(solver=cp.MOSEK, mosek_params=MOSEK_PARAMS)
